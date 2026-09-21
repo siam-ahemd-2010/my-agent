@@ -16,8 +16,6 @@ DB_FILE = "chat_history.db"
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    
-    # Client configurations table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS clients (
             page_id TEXT PRIMARY KEY,
@@ -28,8 +26,6 @@ def init_db():
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Conversation messages table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,7 +41,6 @@ def init_db():
 
 init_db()
 
-# Database Helper Functions
 def save_client_config(page_id, page_name, access_token, system_prompt):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
@@ -74,7 +69,7 @@ def get_all_clients():
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
-    cursor.execute('SELECT page_id, page_name, is_active, system_prompt, access_token FROM clients ORDER BY created_at DESC')
+    cursor.execute('SELECT page_id, page_name, is_active, system_prompt FROM clients ORDER BY created_at DESC')
     rows = cursor.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -83,6 +78,13 @@ def update_client_status(page_id, is_active):
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
     cursor.execute('UPDATE clients SET is_active = ? WHERE page_id = ?', (1 if is_active else 0, page_id))
+    conn.commit()
+    conn.close()
+
+def update_client_prompt(page_id, system_prompt):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE clients SET system_prompt = ? WHERE page_id = ?', (system_prompt, page_id))
     conn.commit()
     conn.close()
 
@@ -115,7 +117,6 @@ def get_conversation_history(page_id, sender_psid, limit=10):
         print(f"DB Fetch Error: {e}")
         return []
 
-# Helper: Detect Page Details using Access Token
 def get_facebook_page_info(access_token):
     url = f"https://graph.facebook.com/v19.0/me?access_token={access_token}"
     try:
@@ -138,22 +139,19 @@ def generate_ai_reply(page_id, sender_psid, user_message, system_prompt):
     try:
         groq_client = get_groq_client()
         if not groq_client:
-            return "Service unavailable."
+            return "Service under maintenance."
 
         past_history = get_conversation_history(page_id, sender_psid, limit=10)
-
         messages_payload = [{"role": "system", "content": system_prompt}]
         messages_payload.extend(past_history)
         messages_payload.append({"role": "user", "content": user_message})
 
         default_model = os.getenv("DEFAULT_AI_MODEL", "llama-3.1-8b-instant")
-
         chat_completion = groq_client.chat.completions.create(
             messages=messages_payload,
             model=default_model,
             max_tokens=300
         )
-
         reply_content = chat_completion.choices[0].message.content
 
         save_message(page_id, sender_psid, "user", user_message)
@@ -175,19 +173,38 @@ def send_messenger_message(sender_psid, text, access_token):
     except Exception as e:
         print(f"FB Send Error: {e}")
 
-# ---------------- API ROUTES ----------------
+# ---------------- ROUTES ----------------
 
 @app.route('/')
 def home():
     return render_template('index.html')
 
-# Get List of All Configured Clients
+# Client Specific Dashboard View
+@app.route('/dashboard/<page_id>')
+def client_dashboard(page_id):
+    return render_template('client.html', page_id=page_id)
+
 @app.route('/api/clients', methods=['GET'])
 def list_clients():
-    clients = get_all_clients()
-    return jsonify({"success": True, "clients": clients})
+    return jsonify({"success": True, "clients": get_all_clients()})
 
-# Save or Add New Client Settings
+@app.route('/api/clients/<page_id>', methods=['GET'])
+def get_client_details(page_id):
+    client = get_client_by_page_id(page_id)
+    if not client:
+        return jsonify({"success": False, "error": "Client not found"}), 404
+    
+    # Hide sensitive access token for security
+    return jsonify({
+        "success": True,
+        "client": {
+            "page_id": client["page_id"],
+            "page_name": client["page_name"],
+            "system_prompt": client["system_prompt"],
+            "is_active": client["is_active"]
+        }
+    })
+
 @app.route('/api/clients/save', methods=['POST'])
 def save_client():
     data = request.get_json() or {}
@@ -195,7 +212,7 @@ def save_client():
     prompt = data.get('system_prompt', '').strip()
 
     if not token or not prompt:
-        return jsonify({"success": False, "error": "Access Token and System Prompt are required"}), 400
+        return jsonify({"success": False, "error": "Token & System Prompt required"}), 400
 
     page_id, page_name = get_facebook_page_info(token)
     if not page_id:
@@ -204,15 +221,22 @@ def save_client():
     save_client_config(page_id, page_name, token, prompt)
     return jsonify({
         "success": True,
-        "client": {
-            "page_id": page_id,
-            "page_name": page_name,
-            "is_active": 1,
-            "system_prompt": prompt
-        }
+        "page_id": page_id,
+        "page_name": page_name
     })
 
-# Toggle Client Status On/Off
+@app.route('/api/clients/update-prompt', methods=['POST'])
+def update_prompt():
+    data = request.get_json() or {}
+    page_id = data.get('page_id')
+    prompt = data.get('system_prompt', '').strip()
+
+    if not page_id or not prompt:
+        return jsonify({"success": False, "error": "Missing page_id or system_prompt"}), 400
+
+    update_client_prompt(page_id, prompt)
+    return jsonify({"success": True})
+
 @app.route('/api/clients/toggle', methods=['POST'])
 def toggle_client():
     data = request.get_json() or {}
@@ -225,7 +249,6 @@ def toggle_client():
     update_client_status(page_id, is_active)
     return jsonify({"success": True, "is_active": is_active})
 
-# Webhook Verification (GET)
 @app.route('/webhook', methods=['GET'])
 def verify_webhook():
     mode = request.args.get('hub.mode')
@@ -237,19 +260,15 @@ def verify_webhook():
         return challenge, 200
     return "Forbidden", 403
 
-# Webhook Event Processing (POST) - MULTI-TENANT ENGINE
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.get_json() or {}
 
     if data.get('object') == 'page':
         for entry in data.get('entry', []):
-            page_id = entry.get('id')  # Detect which page received the message!
-            
-            # 1. Fetch Client Configuration from DB for this specific page_id
+            page_id = entry.get('id')
             client = get_client_by_page_id(page_id)
             if not client or not client['is_active']:
-                print(f"Skipping: Client page {page_id} is not configured or inactive.")
                 continue
 
             messaging_list = entry.get('messaging', [])
@@ -259,14 +278,12 @@ def handle_webhook():
                     user_message = messaging_event['message'].get('text')
 
                     if user_message:
-                        # 2. Generate Reply using this client's specific System Prompt
                         ai_reply = generate_ai_reply(
                             page_id=page_id,
                             sender_psid=sender_psid,
                             user_message=user_message,
                             system_prompt=client['system_prompt']
                         )
-                        # 3. Send Message using this client's specific Access Token
                         send_messenger_message(
                             sender_psid=sender_psid,
                             text=ai_reply,
