@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import sqlite3
 import requests
 import httpx
@@ -170,6 +172,20 @@ def generate_ai_reply(page_id, sender_psid, user_message, system_prompt):
         print(f"Groq AI Error: {e}")
         return "Thank you for messaging us. We will get back to you shortly."
 
+# ---------------- MESSENGER HELPER FUNCTIONS ----------------
+
+def send_typing_indicator(sender_psid, access_token):
+    """ Messenger-e Customer ke 4-5 Sec Typing animation (bubble) dekhabe """
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={access_token}"
+    payload = {
+        "recipient": {"id": sender_psid},
+        "sender_action": "typing_on"
+    }
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"FB Typing Indicator Error: {e}")
+
 def send_messenger_message(sender_psid, text, access_token):
     url = f"https://graph.facebook.com/v19.0/me/messages?access_token={access_token}"
     payload = {
@@ -180,6 +196,39 @@ def send_messenger_message(sender_psid, text, access_token):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"FB Send Error: {e}")
+
+# ---------------- ASYNC BACKGROUND WORKER ----------------
+
+def process_message_async(page_id, sender_psid, user_message, client):
+    """ 
+    Background Thread:
+    1. Messenger-e Typing Action Send Korbe.
+    2. 4 Second delay korbe (Rate limit comanor jonno & Human-like feel dite).
+    3. AI Reply Generate & Send Korbe.
+    """
+    try:
+        # Step 1: Send typing indicator
+        send_typing_indicator(sender_psid, client['access_token'])
+
+        # Step 2: Delay for 4 seconds
+        time.sleep(4)
+
+        # Step 3: Generate AI reply
+        ai_reply = generate_ai_reply(
+            page_id=page_id,
+            sender_psid=sender_psid,
+            user_message=user_message,
+            system_prompt=client['system_prompt']
+        )
+
+        # Step 4: Send the message
+        send_messenger_message(
+            sender_psid=sender_psid,
+            text=ai_reply,
+            access_token=client['access_token']
+        )
+    except Exception as e:
+        print(f"Async Message Error: {e}")
 
 # ---------------- ROUTES ----------------
 
@@ -295,17 +344,11 @@ def handle_webhook():
                     user_message = messaging_event['message'].get('text')
 
                     if user_message:
-                        ai_reply = generate_ai_reply(
-                            page_id=page_id,
-                            sender_psid=sender_psid,
-                            user_message=user_message,
-                            system_prompt=client['system_prompt']
-                        )
-                        send_messenger_message(
-                            sender_psid=sender_psid,
-                            text=ai_reply,
-                            access_token=client['access_token']
-                        )
+                        # Non-blocking async thread dispatch:
+                        threading.Thread(
+                            target=process_message_async,
+                            args=(page_id, sender_psid, user_message, client)
+                        ).start()
 
         return "EVENT_RECEIVED", 200
     return "Not Found", 404
