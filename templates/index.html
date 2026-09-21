@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Python Client AI Automation Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
+  <div class="bg-gray-800 border border-gray-700 rounded-2xl p-8 max-w-lg w-full shadow-2xl">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-xl font-bold text-indigo-400">Python AI Messenger Control</h1>
+      <span id="badgeStatus" class="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
+        ACTIVE
+      </span>
+    </div>
+
+    <!-- System Prompt Input -->
+    <div class="mb-6">
+      <label class="block text-sm font-medium mb-2 text-gray-300">Business AI System Prompt</label>
+      <textarea id="systemPrompt" rows="5" class="w-full bg-gray-900 border border-gray-700 rounded-xl p-3 text-sm focus:outline-none focus:border-indigo-500 text-gray-200" placeholder="e.g. You are an AI sales agent for a fashion store..."></textarea>
+      <button onclick="savePrompt()" class="mt-3 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 rounded-xl transition-all text-sm">
+        Save Prompt Instructions
+      </button>
+    </div>
+
+    <!-- On / Off Toggle Control -->
+    <div class="pt-6 border-t border-gray-700 flex items-center justify-between">
+      <div>
+        <h3 class="font-semibold text-sm">Automation Status</h3>
+        <p id="statusDescription" class="text-xs text-gray-400">Auto-reply is currently active.</p>
+      </div>
+      <button id="toggleBtn" onclick="toggleAutomation()" class="px-6 py-2 rounded-full font-bold text-sm bg-green-500 hover:bg-green-600 text-white transition-all">
+        ON
+      </button>
+    </div>
+  </div>
+
+  <script>
+    let isAutomationActive = true;
+
+    async function loadConfig() {
+      try {
+        const res = await fetch('/api/config');
+        const data = await res.json();
+        
+        document.getElementById('systemPrompt').value = data.systemPrompt || '';
+        isAutomationActive = data.isActive;
+        updateUI();
+      } catch (err) {
+        console.error('Failed to load settings:', err);
+      }
+    }
+
+    function updateUI() {
+      const btn = document.getElementById('toggleBtn');
+      const badge = document.getElementById('badgeStatus');
+      const desc = document.getElementById('statusDescription');
+
+      if (isAutomationActive) {
+        btn.innerText = 'ON';
+        btn.className = 'px-6 py-2 rounded-full font-bold text-sm bg-green-500 hover:bg-green-600 text-white transition-all';
+        badge.innerText = 'ACTIVE';
+        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30';
+        desc.innerText = 'Auto-reply is currently active.';
+      } else {
+        btn.innerText = 'OFF';
+        btn.className = 'px-6 py-2 rounded-full font-bold text-sm bg-red-500 hover:bg-red-600 text-white transition-all';
+        badge.innerText = 'PAUSED';
+        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30';
+        desc.innerText = 'Auto-reply is currently paused.';
+      }
+    }
+
+    async function savePrompt() {
+      const prompt = document.getElementById('systemPrompt').value.trim();
+      if (!prompt) return alert('Prompt cannot be empty!');
+
+      const res = await fetch('/api/config/prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ systemPrompt: prompt })
+      });
+      const data = await res.json();
+      if (data.success) alert('AI Instructions Saved Successfully!');
+    }
+
+    async function toggleAutomation() {
+      isAutomationActive = !isAutomationActive;
+      updateUI();
+
+      await fetch('/api/config/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isActive: isAutomationActive })
+      });
+    }
+
+    loadConfig();
+  </script>
+</body>
+</html>
