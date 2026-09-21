@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 from groq import Groq
 
+# Load environment variables
 load_dotenv()
 
 app = Flask(__name__)
@@ -14,12 +15,21 @@ client_config = {
     "isActive": True
 }
 
-# Initialize Groq Client
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Safe Groq Client Initialization
+def get_groq_client():
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        print("WARNING: GROQ_API_KEY environment variable is not set!")
+        return None
+    return Groq(api_key=api_key)
 
 # Function: Generate AI Reply using Groq Python SDK
 def generate_ai_reply(user_message):
     try:
+        groq_client = get_groq_client()
+        if not groq_client:
+            return "Thank you for messaging us. Our service is currently under maintenance."
+
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": client_config["systemPrompt"]},
@@ -36,6 +46,10 @@ def generate_ai_reply(user_message):
 # Function: Send Reply to Messenger via Requests
 def send_messenger_message(sender_psid, text):
     page_token = os.getenv("FB_PAGE_ACCESS_TOKEN")
+    if not page_token:
+        print("ERROR: FB_PAGE_ACCESS_TOKEN is missing!")
+        return
+
     url = f"https://graph.facebook.com/v19.0/me/messages?access_token={page_token}"
     payload = {
         "recipient": {"id": sender_psid},
@@ -59,7 +73,7 @@ def get_config():
 
 @app.route('/api/config/prompt', methods=['POST'])
 def update_prompt():
-    data = request.get_json()
+    data = request.get_json() or {}
     if 'systemPrompt' in data and data['systemPrompt'].strip():
         client_config['systemPrompt'] = data['systemPrompt'].strip()
         return jsonify({"success": True, "message": "Prompt updated"})
@@ -67,7 +81,7 @@ def update_prompt():
 
 @app.route('/api/config/toggle', methods=['POST'])
 def toggle_status():
-    data = request.get_json()
+    data = request.get_json() or {}
     if 'isActive' in data:
         client_config['isActive'] = bool(data['isActive'])
         return jsonify({"success": True, "isActive": client_config['isActive']})
@@ -90,7 +104,7 @@ def verify_webhook():
 # Webhook Event Processing (POST)
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
-    data = request.get_json()
+    data = request.get_json() or {}
 
     if data.get('object') == 'page':
         # Check if Automation is turned ON
@@ -120,4 +134,4 @@ def handle_webhook():
 
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 3000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port)
