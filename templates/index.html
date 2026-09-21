@@ -1,102 +1,118 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Python Client AI Automation Manager</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Messenger Automation Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center p-4">
-  <div class="bg-gray-800 border border-gray-700 rounded-2xl p-8 max-w-lg w-full shadow-2xl">
-    <div class="flex items-center justify-between mb-6">
-      <h1 class="text-xl font-bold text-indigo-400">Python AI Messenger Control</h1>
-      <span id="badgeStatus" class="px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30">
-        ACTIVE
-      </span>
+<body class="bg-gray-100 min-h-screen p-6">
+    <div class="max-w-3xl mx-auto bg-white shadow-md rounded-lg p-6">
+        <h1 class="text-2xl font-bold text-gray-800 mb-6">Messenger Bot Control Panel</h1>
+
+        <!-- SETUP / EDIT FORM (Invisible after Start Automation) -->
+        <div id="setup-form" class="space-y-4 border p-4 rounded-lg bg-gray-50">
+            <h2 class="text-lg font-semibold text-gray-700">Add / Edit Client Settings</h2>
+            
+            <div>
+                <label class="block text-sm font-medium text-gray-700">Facebook Page Access Token</label>
+                <input type="text" id="access_token" placeholder="EAA..." class="w-full mt-1 p-2 border rounded-md focus:ring focus:ring-blue-300">
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700">System Prompt</label>
+                <textarea id="system_prompt" rows="3" placeholder="You are a helpful customer service assistant..." class="w-full mt-1 p-2 border rounded-md focus:ring focus:ring-blue-300"></textarea>
+            </div>
+
+            <button onclick="startAutomation()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-md transition">
+                Start Automation
+            </button>
+        </div>
+
+        <!-- ACTIVE CLIENTS LIST (Invisible inputs, active toggles) -->
+        <div class="mt-8">
+            <h2 class="text-lg font-semibold text-gray-800 mb-4">Configured Pages & Automation Status</h2>
+            <div id="clients-list" class="space-y-4">
+                <!-- Dynamic client cards will load here -->
+            </div>
+        </div>
     </div>
 
-    <!-- System Prompt Input -->
-    <div class="mb-6">
-      <label class="block text-sm font-medium mb-2 text-gray-300">Business AI System Prompt</label>
-      <textarea id="systemPrompt" rows="5" class="w-full bg-gray-900 border border-gray-700 rounded-xl p-3 text-sm focus:outline-none focus:border-indigo-500 text-gray-200" placeholder="e.g. You are an AI sales agent for a fashion store..."></textarea>
-      <button onclick="savePrompt()" class="mt-3 w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 rounded-xl transition-all text-sm">
-        Save Prompt Instructions
-      </button>
-    </div>
+    <script>
+        async function loadClients() {
+            const res = await fetch('/api/clients');
+            const data = await res.json();
+            const listDiv = document.getElementById('clients-list');
+            listDiv.innerHTML = '';
 
-    <!-- On / Off Toggle Control -->
-    <div class="pt-6 border-t border-gray-700 flex items-center justify-between">
-      <div>
-        <h3 class="font-semibold text-sm">Automation Status</h3>
-        <p id="statusDescription" class="text-xs text-gray-400">Auto-reply is currently active.</p>
-      </div>
-      <button id="toggleBtn" onclick="toggleAutomation()" class="px-6 py-2 rounded-full font-bold text-sm bg-green-500 hover:bg-green-600 text-white transition-all">
-        ON
-      </button>
-    </div>
-  </div>
+            if (data.clients.length === 0) {
+                listDiv.innerHTML = `<p class="text-sm text-gray-500">No active pages configured yet.</p>`;
+                return;
+            }
 
-  <script>
-    let isAutomationActive = true;
+            data.clients.forEach(client => {
+                const isChecked = client.is_active ? 'checked' : '';
+                const card = `
+                    <div class="flex items-center justify-between border p-4 rounded-lg bg-white shadow-sm">
+                        <div>
+                            <h3 class="font-bold text-gray-800">${client.page_name || 'Facebook Page'}</h3>
+                            <p class="text-xs text-gray-500">Page ID: ${client.page_id}</p>
+                            <p class="text-xs text-gray-600 mt-1 italic">Prompt: "${client.system_prompt.substring(0, 50)}..."</p>
+                        </div>
+                        <div class="flex items-center space-x-3">
+                            <span class="text-sm font-medium ${client.is_active ? 'text-green-600' : 'text-red-500'}">
+                                ${client.is_active ? 'Active' : 'Inactive'}
+                            </span>
+                            <label class="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" ${isChecked} onchange="toggleAutomation('${client.page_id}', this.checked)" class="sr-only peer">
+                                <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+                            </label>
+                        </div>
+                    </div>
+                `;
+                listDiv.innerHTML += card;
+            });
+        }
 
-    async function loadConfig() {
-      try {
-        const res = await fetch('/api/config');
-        const data = await res.json();
-        
-        document.getElementById('systemPrompt').value = data.systemPrompt || '';
-        isAutomationActive = data.isActive;
-        updateUI();
-      } catch (err) {
-        console.error('Failed to load settings:', err);
-      }
-    }
+        async function startAutomation() {
+            const token = document.getElementById('access_token').value.trim();
+            const prompt = document.getElementById('system_prompt').value.trim();
 
-    function updateUI() {
-      const btn = document.getElementById('toggleBtn');
-      const badge = document.getElementById('badgeStatus');
-      const desc = document.getElementById('statusDescription');
+            if (!token || !prompt) {
+                alert("Please fill in both Access Token and System Prompt!");
+                return;
+            }
 
-      if (isAutomationActive) {
-        btn.innerText = 'ON';
-        btn.className = 'px-6 py-2 rounded-full font-bold text-sm bg-green-500 hover:bg-green-600 text-white transition-all';
-        badge.innerText = 'ACTIVE';
-        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-green-500/20 text-green-400 border border-green-500/30';
-        desc.innerText = 'Auto-reply is currently active.';
-      } else {
-        btn.innerText = 'OFF';
-        btn.className = 'px-6 py-2 rounded-full font-bold text-sm bg-red-500 hover:bg-red-600 text-white transition-all';
-        badge.innerText = 'PAUSED';
-        badge.className = 'px-3 py-1 rounded-full text-xs font-bold bg-red-500/20 text-red-400 border border-red-500/30';
-        desc.innerText = 'Auto-reply is currently paused.';
-      }
-    }
+            const res = await fetch('/api/clients/save', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ access_token: token, system_prompt: prompt })
+            });
 
-    async function savePrompt() {
-      const prompt = document.getElementById('systemPrompt').value.trim();
-      if (!prompt) return alert('Prompt cannot be empty!');
+            const result = await res.json();
+            if (result.success) {
+                // Clear and Hide Inputs
+                document.getElementById('access_token').value = '';
+                document.getElementById('system_prompt').value = '';
+                
+                // Reload client list
+                loadClients();
+            } else {
+                alert("Error: " + result.error);
+            }
+        }
 
-      const res = await fetch('/api/config/prompt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ systemPrompt: prompt })
-      });
-      const data = await res.json();
-      if (data.success) alert('AI Instructions Saved Successfully!');
-    }
+        async function toggleAutomation(pageId, isActive) {
+            await fetch('/api/clients/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ page_id: pageId, is_active: isActive })
+            });
+            loadClients();
+        }
 
-    async function toggleAutomation() {
-      isAutomationActive = !isAutomationActive;
-      updateUI();
-
-      await fetch('/api/config/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ isActive: isAutomationActive })
-      });
-    }
-
-    loadConfig();
-  </script>
+        // Initial Load
+        loadClients();
+    </script>
 </body>
 </html>
