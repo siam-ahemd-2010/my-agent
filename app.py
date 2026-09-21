@@ -88,6 +88,14 @@ def update_client_prompt(page_id, system_prompt):
     conn.commit()
     conn.close()
 
+def delete_client_by_page_id(page_id):
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM clients WHERE page_id = ?', (page_id,))
+    cursor.execute('DELETE FROM messages WHERE page_id = ?', (page_id,))
+    conn.commit()
+    conn.close()
+
 def save_message(page_id, sender_psid, role, content):
     try:
         conn = sqlite3.connect(DB_FILE)
@@ -179,7 +187,6 @@ def send_messenger_message(sender_psid, text, access_token):
 def home():
     return render_template('index.html')
 
-# Client Specific Dashboard View
 @app.route('/dashboard/<page_id>')
 def client_dashboard(page_id):
     return render_template('client.html', page_id=page_id)
@@ -194,7 +201,6 @@ def get_client_details(page_id):
     if not client:
         return jsonify({"success": False, "error": "Client not found"}), 404
     
-    # Hide sensitive access token for security
     return jsonify({
         "success": True,
         "client": {
@@ -248,6 +254,17 @@ def toggle_client():
 
     update_client_status(page_id, is_active)
     return jsonify({"success": True, "is_active": is_active})
+
+@app.route('/api/clients/delete', methods=['POST'])
+def delete_client():
+    data = request.get_json() or {}
+    page_id = data.get('page_id')
+
+    if not page_id:
+        return jsonify({"success": False, "error": "Missing page_id"}), 400
+
+    delete_client_by_page_id(page_id)
+    return jsonify({"success": True, "message": "Client deleted successfully"})
 
 @app.route('/webhook', methods=['GET'])
 def verify_webhook():

@@ -99,7 +99,7 @@
                             </div>
                         </div>
 
-                        <!-- Dedicated Client Share Link -->
+                        <!-- Dedicated Client Share Link & Actions -->
                         <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                             <input type="text" readonly value="${clientDashboardUrl}" class="px-3 py-2 text-xs bg-white/80 border border-white rounded-xl text-gray-600 font-mono select-all focus:outline-none">
                             <button onclick="copyToClipboard('${clientDashboardUrl}')" class="px-4 py-2 bg-white/90 hover:bg-white text-orange-600 font-semibold text-xs rounded-xl border border-orange-200 transition">
@@ -108,6 +108,9 @@
                             <a href="/dashboard/${client.page_id}" target="_blank" class="px-4 py-2 orange-gradient-btn text-white font-semibold text-xs rounded-xl text-center">
                                 Open Dashboard ↗
                             </a>
+                            <button onclick="deleteClient('${client.page_id}', '${client.page_name || 'this page'}')" class="px-4 py-2 bg-rose-500/10 hover:bg-rose-500 hover:text-white text-rose-600 font-semibold text-xs rounded-xl border border-rose-200 transition">
+                                Delete
+                            </button>
                         </div>
                     </div>
                 `;
@@ -137,6 +140,23 @@
                 loadClients();
             } else {
                 alert("Error: " + result.error);
+            }
+        }
+
+        async function deleteClient(pageId, pageName) {
+            if (confirm(`Are you sure you want to remove "${pageName}" (ID: ${pageId})?`)) {
+                const res = await fetch('/api/clients/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ page_id: pageId })
+                });
+
+                const result = await res.json();
+                if (result.success) {
+                    loadClients();
+                } else {
+                    alert("Error: " + result.error);
+                }
             }
         }
 
