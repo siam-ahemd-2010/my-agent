@@ -1,5 +1,6 @@
 import os
 import requests
+import httpx
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 from groq import Groq
@@ -15,13 +16,16 @@ client_config = {
     "isActive": True
 }
 
-# Safe Groq Client Initialization
+# Safe Groq Client Initialization (with explicit httpx client to bypass proxy errors)
 def get_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         print("WARNING: GROQ_API_KEY environment variable is not set!")
         return None
-    return Groq(api_key=api_key)
+    
+    # Custom httpx client prevents 'proxies' kwarg crash on deployment environments
+    http_client = httpx.Client()
+    return Groq(api_key=api_key, http_client=http_client)
 
 # Function: Generate AI Reply using Groq Python SDK
 def generate_ai_reply(user_message):
