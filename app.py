@@ -16,14 +16,14 @@ client_config = {
     "isActive": True
 }
 
-# Safe Groq Client Initialization (with explicit httpx client to bypass proxy errors)
+# Safe Groq Client Initialization
 def get_groq_client():
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         print("WARNING: GROQ_API_KEY environment variable is not set!")
         return None
     
-    # Custom httpx client prevents 'proxies' kwarg crash on deployment environments
+    # Custom httpx client explicitly bypassing proxy configuration errors
     http_client = httpx.Client()
     return Groq(api_key=api_key, http_client=http_client)
 
@@ -34,12 +34,15 @@ def generate_ai_reply(user_message):
         if not groq_client:
             return "Thank you for messaging us. Our service is currently under maintenance."
 
+        # Model is updated to llama-3.1-8b-instant or qwen/qwen3.8-27b
+        default_model = os.getenv("DEFAULT_AI_MODEL", "qwen/qwen3.8-27b")
+
         chat_completion = groq_client.chat.completions.create(
             messages=[
                 {"role": "system", "content": client_config["systemPrompt"]},
                 {"role": "user", "content": user_message}
             ],
-            model=os.getenv("DEFAULT_AI_MODEL", "llama-3.3-70b-versatile"),
+            model=default_model,
             max_tokens=300
         )
         return chat_completion.choices[0].message.content
