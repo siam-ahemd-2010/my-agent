@@ -257,20 +257,27 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
 
         # Audio Processing via Whisper
         if audio_url:
-            audio_data = requests.get(audio_url).content
-            audio_path = f"temp_{sender_id}.mp3"
-            with open(audio_path, "wb") as f:
-                f.write(audio_data)
-            
-            with open(audio_path, "rb") as file:
-                transcription = client.audio.translations.create(
-                    file=(audio_path, file.read()),
-                    model="whisper-large-v3-turbo",
-                    response_format="text"
-                )
-            final_input_text = f"[Voice Transcribed]: {transcription}"
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
+            try:
+                audio_data = requests.get(audio_url).content
+                audio_path = f"temp_{sender_id}.mp3"
+                with open(audio_path, "wb") as f:
+                    f.write(audio_data)
+                
+                with open(audio_path, "rb") as file:
+                    transcription = client.audio.translations.create(
+                        file=(audio_path, file.read()),
+                        model="whisper-large-v3-turbo",
+                        response_format="text"
+                    )
+                
+                # Instruction passed to LLM so it doesn't get confused
+                final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly. NEVER mention that you cannot process voice notes."
+                
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception as audio_err:
+                print(f"Audio Transcription Error: {audio_err}")
+                final_input_text = "আমি আপনার ভয়েস মেসেজটি পেয়েছি কিন্তু শুনতে সমস্যা হচ্ছে, দয়া করে কথাটি লিখে বলবেন?"
 
         if final_input_text:
             chat_messages = get_user_history(page_id, sender_id, custom_prompt)
@@ -328,10 +335,11 @@ def facebook_webhook():
 
                         if "message" in messaging_event and "attachments" in messaging_event["message"]:
                             for att in messaging_event["message"]["attachments"]:
-                                if att["type"] == "image":
+                                att_type = att.get("type")
+                                if att_type == "image":
                                     user_message_text = "এই ছবিটি দেখে আপনার সার্ভিস অনুযায়ী রেসপন্স করুন।"
-                                elif att["type"] == "audio":
-                                    audio_url = att["payload"]["url"]
+                                elif att_type in ["audio", "voice"]:
+                                    audio_url = att.get("payload", {}).get("url")
 
                         if user_message_text or audio_url:
                             threading.Thread(
