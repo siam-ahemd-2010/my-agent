@@ -1,358 +1,413 @@
 import os
-import time
-import threading
 import sqlite3
 import requests
-import httpx
-from flask import Flask, request, jsonify, render_template
-from dotenv import load_dotenv
+import threading
+from flask import Flask, request, jsonify, render_template_string, redirect, session
 from groq import Groq
 
-load_dotenv()
+# --- Configuration ---
+client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "")
 
-app = Flask(__name__)
+FB_APP_ID = os.environ.get("FB_APP_ID", "")
+FB_APP_SECRET = os.environ.get("FB_APP_SECRET", "")
+BASE_URL = os.environ.get("BASE_URL", "https://my-agent-anvr.onrender.com")
 
-DB_FILE = "chat_history.db"
-
-# ---------------- DATABASE SETUP ----------------
+# --- Database Setup ---
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             page_id TEXT PRIMARY KEY,
-            page_name TEXT,
-            access_token TEXT NOT NULL,
-            system_prompt TEXT NOT NULL,
-            is_active INTEGER DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            page_access_token TEXT,
+            client_name TEXT,
+            custom_prompt TEXT,
+            bot_status BOOLEAN DEFAULT 1
         )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            page_id TEXT NOT NULL,
-            sender_psid TEXT NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            page_id TEXT,
+            sender_id TEXT,
+            role TEXT,
+            content TEXT
         )
-    ''')
+    """)
     conn.commit()
     conn.close()
 
 init_db()
 
-def save_client_config(page_id, page_name, access_token, system_prompt):
-    conn = sqlite3.connect(DB_FILE)
+def get_client_details(page_id):
+    conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO clients (page_id, page_name, access_token, system_prompt, is_active)
-        VALUES (?, ?, ?, ?, 1)
-        ON CONFLICT(page_id) DO UPDATE SET
-            page_name=excluded.page_name,
-            access_token=excluded.access_token,
-            system_prompt=excluded.system_prompt,
-            is_active=1
-    ''', (page_id, page_name, access_token, system_prompt))
-    conn.commit()
-    conn.close()
-
-def get_client_by_page_id(page_id):
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM clients WHERE page_id = ?', (page_id,))
+    cursor.execute("SELECT page_access_token, custom_prompt, bot_status FROM clients WHERE page_id = ?", (page_id,))
     row = cursor.fetchone()
     conn.close()
-    return dict(row) if row else None
+    if row:
+        return row[0], row[1], row[2]
+    return None, None, False
 
-def get_all_clients():
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
+def get_user_history(page_id, sender_id, custom_prompt):
+    conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
-    cursor.execute('SELECT page_id, page_name, is_active, system_prompt FROM clients ORDER BY created_at DESC')
+    
+    cursor.execute("""
+        SELECT role, content FROM (
+            SELECT role, content, ROWID FROM chat_history 
+            WHERE page_id = ? AND sender_id = ? 
+            ORDER BY ROWID DESC LIMIT 10
+        ) ORDER BY ROWID ASC
+    """, (page_id, sender_id))
+    
     rows = cursor.fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    
+    system_instruction = f"{custom_prompt}\n\n[STRICT RULE: Always reply clearly in Bengali (বাংলা) or Banglish as requested. Never use Chinese, Hindi, or unwanted foreign characters. Keep responses complete and meaningful.]"
+    
+    history = [{"role": "system", "content": system_instruction}]
+    for row in rows:
+        history.append({"role": row[0], "content": row[1]})
+    return history
 
-def update_client_status(page_id, is_active):
-    conn = sqlite3.connect(DB_FILE)
+def save_message_to_db(page_id, sender_id, role, content):
+    conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
-    cursor.execute('UPDATE clients SET is_active = ? WHERE page_id = ?', (1 if is_active else 0, page_id))
+    cursor.execute("INSERT INTO chat_history (page_id, sender_id, role, content) VALUES (?, ?, ?, ?)", (page_id, sender_id, role, content))
     conn.commit()
     conn.close()
 
-def update_client_prompt(page_id, system_prompt):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('UPDATE clients SET system_prompt = ? WHERE page_id = ?', (system_prompt, page_id))
-    conn.commit()
-    conn.close()
+# Flask App Setup
+flask_app = Flask(__name__)
+flask_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_key_autocraft")
 
-def delete_client_by_page_id(page_id):
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute('DELETE FROM clients WHERE page_id = ?', (page_id,))
-    cursor.execute('DELETE FROM messages WHERE page_id = ?', (page_id,))
-    conn.commit()
-    conn.close()
+ADMIN_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoCraft SaaS Central Admin Panel</title>
+    <style>
+        body { background: #0f172a; color: #f8fafc; font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 40px 20px; }
+        .card { background: #1e293b; max-width: 800px; margin: 0 auto; padding: 30px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }
+        textarea, button { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #475569; font-size: 15px; box-sizing: border-box; }
+        textarea { background: #0f172a; color: white; resize: vertical; height: 100px; }
+        .page-item { background: #0f172a; padding: 18px; border-radius: 10px; margin-bottom: 15px; border: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; }
+        .page-info { display: flex; flex-direction: column; gap: 4px; }
+        .actions { display: flex; align-items: center; gap: 12px; }
+        .delete-btn { background: #ef4444; color: white; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: bold; width: auto; margin: 0; font-size: 13px; }
+        .delete-btn:hover { background: #dc2626; }
+        
+        .switch { position: relative; display: inline-block; width: 60px; height: 32px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .4s; border-radius: 34px; border: 1px solid #475569; }
+        .slider:before { position: absolute; content: ""; height: 24px; width: 24px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background: #22c55e; border-color: #4ade80; }
+        input:checked + .slider:before { transform: translateX(28px); }
+        h2, p { text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h2>AutoCraft SaaS Central Admin Panel</h2>
+        <p style="color: #38bdf8; font-size: 14px;">সকল পেজ এবং বটের কন্ট্রোল আপনার হাতে</p>
+        
+        {% if connected_pages %}
+        <div style="margin-bottom: 25px;">
+            <h3 style="color: #38bdf8; margin-bottom: 15px;">কানেক্টেড পেজসমূহ:</h3>
+            {% for p in connected_pages %}
+                <div class="page-item">
+                    <div class="page-info">
+                        <b style="font-size: 16px; color: #f8fafc;">{{ p[1] }}</b>
+                        <small style="color: #94a3b8;">Page ID: {{ p[0] }}</small>
+                        <small style="color: {{ '#4ade80' if p[2] == 1 else '#f87171' }}; font-weight: bold;">
+                            স্ট্যাটাস: {{ 'ACTIVE (চালু)' if p[2] == 1 else 'INACTIVE (বন্ধ)' }}
+                        </small>
+                    </div>
 
-def save_message(page_id, sender_psid, role, content):
-    try:
-        conn = sqlite3.connect(DB_FILE)
+                    <div class="actions">
+                        <form action="/toggle-page" method="POST" style="margin:0;">
+                            <input type="hidden" name="page_id" value="{{ p[0] }}">
+                            <label class="switch" title="অন/অফ করুন">
+                                <input type="checkbox" onchange="this.form.submit()" {{ 'checked' if p[2] == 1 else '' }}>
+                                <span class="slider"></span>
+                            </label>
+                        </form>
+
+                        <form action="/delete-page" method="POST" onsubmit="return confirm('আপনি কি নিশ্চিত যে এই পেজটি মুছে ফেলতে চান?');" style="margin:0;">
+                            <input type="hidden" name="page_id" value="{{ p[0] }}">
+                            <button type="submit" class="delete-btn">ডিলিট</button>
+                        </form>
+                    </div>
+                </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p style="color: #94a3b8; font-size: 14px;">এখনো কোনো পেজ যুক্ত করা হয়নি।</p>
+        {% endif %}
+
+        <hr style="border-color: #334155; margin: 25px 0;">
+
+        <form action="/save-prompt" method="POST">
+            <label style="font-weight: bold;">নতুন পেজের জন্য System Prompt (বটের নির্দেশিকা):</label>
+            <textarea name="custom_prompt" placeholder="যেমন: আপনি ফ্যাশন হাউসের সেলস প্রতিনিধি..." required></textarea>
+            <button type="submit" style="background: #2563eb; color: white; font-weight: bold; cursor: pointer;">নতুন ফেসবুক পেজ কানেক্ট করুন</button>
+        </form>
+    </div>
+</body>
+</html>
+"""
+
+@flask_app.route("/")
+def dashboard():
+    conn = sqlite3.connect("bot_memory.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT page_id, client_name, bot_status FROM clients")
+    connected_pages = cursor.fetchall()
+    conn.close()
+    return render_template_string(ADMIN_TEMPLATE, connected_pages=connected_pages)
+
+@flask_app.route("/toggle-page", methods=["POST"])
+def toggle_page():
+    page_id = request.form.get("page_id")
+    if page_id:
+        conn = sqlite3.connect("bot_memory.db")
         cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO messages (page_id, sender_psid, role, content)
-            VALUES (?, ?, ?, ?)
-        ''', (page_id, sender_psid, role, content))
+        cursor.execute("SELECT bot_status FROM clients WHERE page_id = ?", (page_id,))
+        row = cursor.fetchone()
+        if row:
+            new_status = 0 if row[0] == 1 else 1
+            cursor.execute("UPDATE clients SET bot_status = ? WHERE page_id = ?", (new_status, page_id))
+            conn.commit()
+        conn.close()
+    return redirect("/")
+
+@flask_app.route("/delete-page", methods=["POST"])
+def delete_page():
+    page_id = request.form.get("page_id")
+    if page_id:
+        conn = sqlite3.connect("bot_memory.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT page_access_token FROM clients WHERE page_id = ?", (page_id,))
+        row = cursor.fetchone()
+        
+        if row and row[0]:
+            try:
+                unsub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?access_token={row[0]}"
+                requests.delete(unsub_url)
+            except Exception as e:
+                print(f"Unsubscribe error: {e}")
+
+        cursor.execute("DELETE FROM clients WHERE page_id = ?", (page_id,))
+        cursor.execute("DELETE FROM chat_history WHERE page_id = ?", (page_id,))
         conn.commit()
         conn.close()
-    except Exception as e:
-        print(f"DB Save Error: {e}")
+        
+    return redirect("/")
 
-def get_conversation_history(page_id, sender_psid, limit=10):
+@flask_app.route("/save-prompt", methods=["POST"])
+def save_prompt():
+    session['custom_prompt'] = request.form.get("custom_prompt")
+    fb_login_url = (
+        f"https://www.facebook.com/v18.0/dialog/oauth?"
+        f"client_id={FB_APP_ID}&"
+        f"redirect_uri={BASE_URL}/auth/facebook/callback&"
+        f"scope=pages_messaging,pages_show_list,pages_manage_metadata&"
+        f"auth_type=rerequest"
+    )
+    return redirect(fb_login_url)
+
+@flask_app.route("/auth/facebook/callback")
+def facebook_callback():
+    code = request.args.get("code")
+    if not code:
+        return "Facebook Auth Failed!", 400
+        
+    custom_prompt = session.get('custom_prompt', "আপনি এই পেজের প্রফেশনাল এআই অ্যাসিস্ট্যান্ট।")
+
+    token_url = (
+        f"https://graph.facebook.com/v18.0/oauth/access_token?"
+        f"client_id={FB_APP_ID}&"
+        f"redirect_uri={BASE_URL}/auth/facebook/callback&"
+        f"client_secret={FB_APP_SECRET}&"
+        f"code={code}"
+    )
+    res = requests.get(token_url).json()
+    short_user_token = res.get("access_token")
+
+    if not short_user_token:
+        return f"Token Exchange Error: {res}", 400
+
+    long_token_url = (
+        f"https://graph.facebook.com/v18.0/oauth/access_token?"
+        f"grant_type=fb_exchange_token&"
+        f"client_id={FB_APP_ID}&"
+        f"client_secret={FB_APP_SECRET}&"
+        f"fb_exchange_token={short_user_token}"
+    )
+    long_res = requests.get(long_token_url).json()
+    long_user_token = long_res.get("access_token", short_user_token)
+
+    pages_url = f"https://graph.facebook.com/v18.0/me/accounts?access_token={long_user_token}&limit=250"
+    pages_res = requests.get(pages_url).json()
+    pages = pages_res.get("data", [])
+
+    if not pages:
+        return "কোনো ফেসবুক পেজ পাওয়া যায়নি!", 400
+
+    conn = sqlite3.connect("bot_memory.db")
+    cursor = conn.cursor()
+
+    for page in pages:
+        page_id = page["id"]
+        page_name = page["name"]
+        page_access_token = page["access_token"]
+
+        cursor.execute("SELECT custom_prompt FROM clients WHERE page_id = ?", (page_id,))
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute("""
+                UPDATE clients SET 
+                    page_access_token = ?,
+                    client_name = ?
+                WHERE page_id = ?
+            """, (page_access_token, page_name, page_id))
+        else:
+            cursor.execute("""
+                INSERT INTO clients (page_id, page_access_token, client_name, custom_prompt, bot_status)
+                VALUES (?, ?, ?, ?, 1)
+            """, (page_id, page_access_token, page_name, custom_prompt))
+
+        sub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?subscribed_fields=messages&access_token={page_access_token}"
+        requests.post(sub_url)
+
+    conn.commit()
+    conn.close()
+
+    return redirect("/")
+
+# --- Async Background Processing ---
+def process_message_async(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt):
     try:
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT role, content FROM messages
-            WHERE page_id = ? AND sender_psid = ?
-            ORDER BY id DESC LIMIT ?
-        ''', (page_id, sender_psid, limit))
-        rows = cursor.fetchall()
-        conn.close()
-        return [{"role": role, "content": content} for role, content in reversed(rows)]
+        final_input_text = user_message_text
+
+        # Voice processing with whisper-large-v3-turbo
+        if audio_url:
+            audio_data = requests.get(audio_url).content
+            audio_path = f"temp_{sender_id}.mp3"
+            with open(audio_path, "wb") as f:
+                f.write(audio_data)
+            
+            with open(audio_path, "rb") as file:
+                transcription = client.audio.translations.create(
+                    file=(audio_path, file.read()),
+                    model="whisper-large-v3-turbo",
+                    response_format="text"
+                )
+            final_input_text = f"[Voice Transcribed]: {transcription}"
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+
+        if final_input_text:
+            chat_messages = get_user_history(page_id, sender_id, custom_prompt)
+            
+            save_message_to_db(page_id, sender_id, "user", final_input_text)
+            chat_messages.append({"role": "user", "content": final_input_text})
+
+            ai_reply = generate_ai_reply(chat_messages)
+            save_message_to_db(page_id, sender_id, "assistant", ai_reply)
+            
+            send_facebook_message(page_id, recipient_id=sender_id, message_text=ai_reply, page_access_token=page_access_token)
     except Exception as e:
-        print(f"DB Fetch Error: {e}")
-        return []
+        print(f"Async Error: {e}")
 
-def get_facebook_page_info(access_token):
-    url = f"https://graph.facebook.com/v19.0/me?access_token={access_token}"
+# --- Facebook Webhook Route ---
+@flask_app.route("/webhook", methods=["GET", "POST"])
+def facebook_webhook():
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        
+        if mode and token:
+            if mode == "subscribe" and token == VERIFY_TOKEN:
+                return challenge, 200
+            else:
+                return "Verification failed", 403
+        return "Hello World", 200
+
+    if request.method == "POST":
+        data = request.json
+        try:
+            if data.get("object") == "page":
+                for entry in data.get("entry", []):
+                    page_id = entry.get("id")
+                    
+                    page_access_token, custom_prompt, bot_is_running = get_client_details(page_id)
+                    
+                    if not page_access_token or not bot_is_running or not custom_prompt:
+                        continue
+
+                    for messaging_event in entry.get("messaging", []):
+                        if messaging_event.get("message", {}).get("is_echo"):
+                            continue
+
+                        sender_id = messaging_event.get("sender", {}).get("id")
+                        
+                        if sender_id == page_id:
+                            continue
+
+                        user_message_text = ""
+                        audio_url = None
+
+                        if "message" in messaging_event and "text" in messaging_event["message"]:
+                            user_message_text = messaging_event["message"]["text"]
+
+                        if "message" in messaging_event and "attachments" in messaging_event["message"]:
+                            for att in messaging_event["message"]["attachments"]:
+                                if att["type"] == "image":
+                                    user_message_text = "এই ছবিটি দেখে আপনার সার্ভিস অনুযায়ী রেসপন্স করুন।"
+                                elif att["type"] == "audio":
+                                    audio_url = att["payload"]["url"]
+
+                        if user_message_text or audio_url:
+                            threading.Thread(
+                                target=process_message_async, 
+                                args=(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt)
+                            ).start()
+
+        except Exception as e:
+            print(f"Error processing webhook: {e}")
+            
+        return jsonify({"status": "event received"}), 200
+
+def generate_ai_reply(messages):
     try:
-        res = requests.get(url, timeout=10)
-        data = res.json()
-        if "id" in data:
-            return data["id"], data.get("name", "FB Page")
-    except Exception as e:
-        print(f"FB Page Fetch Error: {e}")
-    return None, None
-
-# ---------------- GROQ AI SETUP ----------------
-def get_groq_client():
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        return None
-    return Groq(api_key=api_key, http_client=httpx.Client())
-
-def generate_ai_reply(page_id, sender_psid, user_message, system_prompt):
-    try:
-        groq_client = get_groq_client()
-        if not groq_client:
-            return "Service under maintenance."
-
-        past_history = get_conversation_history(page_id, sender_psid, limit=10)
-        messages_payload = [{"role": "system", "content": system_prompt}]
-        messages_payload.extend(past_history)
-        messages_payload.append({"role": "user", "content": user_message})
-
-        default_model = os.getenv("DEFAULT_AI_MODEL", "llama-3.1-8b-instant")
-        chat_completion = groq_client.chat.completions.create(
-            messages=messages_payload,
-            model=default_model,
-            max_tokens=300
+        # Text completion with openai/gpt-oss-120b
+        completion = client.chat.completions.create(
+            model="openai/gpt-oss-120b",
+            messages=messages,
+            temperature=0.6,
+            max_tokens=800,
         )
-        reply_content = chat_completion.choices[0].message.content
-
-        save_message(page_id, sender_psid, "user", user_message)
-        save_message(page_id, sender_psid, "assistant", reply_content)
-
-        return reply_content
+        return completion.choices[0].message.content
     except Exception as e:
-        print(f"Groq AI Error: {e}")
-        return "Thank you for messaging us. We will get back to you shortly."
+        print(f"Groq API Error: {e}")
+        return "দুঃখিত, এই মুহূর্তে উত্তর দিতে একটু সমস্যা হচ্ছে।"
 
-# ---------------- MESSENGER HELPER FUNCTIONS ----------------
-
-def send_typing_indicator(sender_psid, access_token):
-    """ Messenger-e Customer ke 4-5 Sec Typing animation (bubble) dekhabe """
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={access_token}"
+def send_facebook_message(page_id, recipient_id, message_text, page_access_token):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={page_access_token}"
     payload = {
-        "recipient": {"id": sender_psid},
-        "sender_action": "typing_on"
+        "messaging_type": "RESPONSE",
+        "recipient": {"id": recipient_id},
+        "message": {"text": message_text}
     }
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"FB Typing Indicator Error: {e}")
+    headers = {"Content-Type": "application/json"}
+    requests.post(url, json=payload, headers=headers)
 
-def send_messenger_message(sender_psid, text, access_token):
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={access_token}"
-    payload = {
-        "recipient": {"id": sender_psid},
-        "message": {"text": text}
-    }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"FB Send Error: {e}")
-
-# ---------------- ASYNC BACKGROUND WORKER ----------------
-
-def process_message_async(page_id, sender_psid, user_message, client):
-    """ 
-    Background Thread:
-    1. Messenger-e Typing Action Send Korbe.
-    2. 4 Second delay korbe (Rate limit comanor jonno & Human-like feel dite).
-    3. AI Reply Generate & Send Korbe.
-    """
-    try:
-        # Step 1: Send typing indicator
-        send_typing_indicator(sender_psid, client['access_token'])
-
-        # Step 2: Delay for 4 seconds
-        time.sleep(4)
-
-        # Step 3: Generate AI reply
-        ai_reply = generate_ai_reply(
-            page_id=page_id,
-            sender_psid=sender_psid,
-            user_message=user_message,
-            system_prompt=client['system_prompt']
-        )
-
-        # Step 4: Send the message
-        send_messenger_message(
-            sender_psid=sender_psid,
-            text=ai_reply,
-            access_token=client['access_token']
-        )
-    except Exception as e:
-        print(f"Async Message Error: {e}")
-
-# ---------------- ROUTES ----------------
-
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-@app.route('/dashboard/<page_id>')
-def client_dashboard(page_id):
-    return render_template('client.html', page_id=page_id)
-
-@app.route('/api/clients', methods=['GET'])
-def list_clients():
-    return jsonify({"success": True, "clients": get_all_clients()})
-
-@app.route('/api/clients/<page_id>', methods=['GET'])
-def get_client_details(page_id):
-    client = get_client_by_page_id(page_id)
-    if not client:
-        return jsonify({"success": False, "error": "Client not found"}), 404
-    
-    return jsonify({
-        "success": True,
-        "client": {
-            "page_id": client["page_id"],
-            "page_name": client["page_name"],
-            "system_prompt": client["system_prompt"],
-            "is_active": client["is_active"]
-        }
-    })
-
-@app.route('/api/clients/save', methods=['POST'])
-def save_client():
-    data = request.get_json() or {}
-    token = data.get('access_token', '').strip()
-    prompt = data.get('system_prompt', '').strip()
-
-    if not token or not prompt:
-        return jsonify({"success": False, "error": "Token & System Prompt required"}), 400
-
-    page_id, page_name = get_facebook_page_info(token)
-    if not page_id:
-        return jsonify({"success": False, "error": "Invalid Facebook Access Token"}), 400
-
-    save_client_config(page_id, page_name, token, prompt)
-    return jsonify({
-        "success": True,
-        "page_id": page_id,
-        "page_name": page_name
-    })
-
-@app.route('/api/clients/update-prompt', methods=['POST'])
-def update_prompt():
-    data = request.get_json() or {}
-    page_id = data.get('page_id')
-    prompt = data.get('system_prompt', '').strip()
-
-    if not page_id or not prompt:
-        return jsonify({"success": False, "error": "Missing page_id or system_prompt"}), 400
-
-    update_client_prompt(page_id, prompt)
-    return jsonify({"success": True})
-
-@app.route('/api/clients/toggle', methods=['POST'])
-def toggle_client():
-    data = request.get_json() or {}
-    page_id = data.get('page_id')
-    is_active = data.get('is_active')
-
-    if page_id is None or is_active is None:
-        return jsonify({"success": False, "error": "Missing page_id or is_active"}), 400
-
-    update_client_status(page_id, is_active)
-    return jsonify({"success": True, "is_active": is_active})
-
-@app.route('/api/clients/delete', methods=['POST'])
-def delete_client():
-    data = request.get_json() or {}
-    page_id = data.get('page_id')
-
-    if not page_id:
-        return jsonify({"success": False, "error": "Missing page_id"}), 400
-
-    delete_client_by_page_id(page_id)
-    return jsonify({"success": True, "message": "Client deleted successfully"})
-
-@app.route('/webhook', methods=['GET'])
-def verify_webhook():
-    mode = request.args.get('hub.mode')
-    token = request.args.get('hub.verify_token')
-    challenge = request.args.get('hub.challenge')
-    verify_token = os.getenv('FB_VERIFY_TOKEN')
-
-    if mode == 'subscribe' and token == verify_token:
-        return challenge, 200
-    return "Forbidden", 403
-
-@app.route('/webhook', methods=['POST'])
-def handle_webhook():
-    data = request.get_json() or {}
-
-    if data.get('object') == 'page':
-        for entry in data.get('entry', []):
-            page_id = entry.get('id')
-            client = get_client_by_page_id(page_id)
-            if not client or not client['is_active']:
-                continue
-
-            messaging_list = entry.get('messaging', [])
-            for messaging_event in messaging_list:
-                if 'message' in messaging_event and not messaging_event['message'].get('is_echo'):
-                    sender_psid = messaging_event['sender']['id']
-                    user_message = messaging_event['message'].get('text')
-
-                    if user_message:
-                        # Non-blocking async thread dispatch:
-                        threading.Thread(
-                            target=process_message_async,
-                            args=(page_id, sender_psid, user_message, client)
-                        ).start()
-
-        return "EVENT_RECEIVED", 200
-    return "Not Found", 404
-
-if __name__ == '__main__':
-    port = int(os.getenv('PORT', 3000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    flask_app.run(host="0.0.0.0", port=port)
