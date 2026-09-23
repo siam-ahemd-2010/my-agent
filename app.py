@@ -78,9 +78,9 @@ def save_message_to_db(page_id, sender_id, role, content):
     conn.commit()
     conn.close()
 
-# Flask App Setup
-flask_app = Flask(__name__)
-flask_app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_key_autocraft")
+# Flask App Setup (Render/Gunicorn-এর জন্য ভ্যারিয়েবলের নাম 'app' রাখা হয়েছে)
+app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "super_secret_key_autocraft")
 
 ADMIN_TEMPLATE = """
 <!DOCTYPE html>
@@ -160,7 +160,7 @@ ADMIN_TEMPLATE = """
 </html>
 """
 
-@flask_app.route("/")
+@app.route("/")
 def dashboard():
     conn = sqlite3.connect("bot_memory.db")
     cursor = conn.cursor()
@@ -169,7 +169,7 @@ def dashboard():
     conn.close()
     return render_template_string(ADMIN_TEMPLATE, connected_pages=connected_pages)
 
-@flask_app.route("/toggle-page", methods=["POST"])
+@app.route("/toggle-page", methods=["POST"])
 def toggle_page():
     page_id = request.form.get("page_id")
     if page_id:
@@ -184,7 +184,7 @@ def toggle_page():
         conn.close()
     return redirect("/")
 
-@flask_app.route("/delete-page", methods=["POST"])
+@app.route("/delete-page", methods=["POST"])
 def delete_page():
     page_id = request.form.get("page_id")
     if page_id:
@@ -207,7 +207,7 @@ def delete_page():
         
     return redirect("/")
 
-@flask_app.route("/save-prompt", methods=["POST"])
+@app.route("/save-prompt", methods=["POST"])
 def save_prompt():
     session['custom_prompt'] = request.form.get("custom_prompt")
     fb_login_url = (
@@ -219,7 +219,7 @@ def save_prompt():
     )
     return redirect(fb_login_url)
 
-@flask_app.route("/auth/facebook/callback")
+@app.route("/auth/facebook/callback")
 def facebook_callback():
     code = request.args.get("code")
     if not code:
@@ -325,7 +325,7 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
         print(f"Async Error: {e}")
 
 # --- Facebook Webhook Route ---
-@flask_app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def facebook_webhook():
     if request.method == "GET":
         mode = request.args.get("hub.mode")
@@ -410,4 +410,4 @@ def send_facebook_message(page_id, recipient_id, message_text, page_access_token
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)
