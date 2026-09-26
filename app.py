@@ -19,9 +19,11 @@ def init_db():
         CREATE TABLE IF NOT EXISTS clients (
             page_id TEXT PRIMARY KEY,
             page_access_token TEXT,
+            comment_access_token TEXT,
             client_name TEXT,
             custom_prompt TEXT,
-            bot_status BOOLEAN DEFAULT 1
+            bot_status BOOLEAN DEFAULT 1,
+            comment_status BOOLEAN DEFAULT 1
         )
     """)
     cursor.execute("""
@@ -46,12 +48,13 @@ def get_db_connection():
 def get_client_details(page_id):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT page_access_token, custom_prompt, bot_status, client_name FROM clients WHERE page_id = ?", (page_id,))
+    cursor.execute("SELECT page_access_token, comment_access_token, custom_prompt, bot_status, comment_status, client_name FROM clients WHERE page_id = ?", (page_id,))
     row = cursor.fetchone()
     conn.close()
     if row:
-        return row["page_access_token"], row["custom_prompt"], bool(row["bot_status"]), row["client_name"]
-    return None, None, False, None
+        c_token = row["comment_access_token"] if row["comment_access_token"] else row["page_access_token"]
+        return row["page_access_token"], c_token, row["custom_prompt"], bool(row["bot_status"]), bool(row["comment_status"]), row["client_name"]
+    return None, None, None, False, False, None
 
 def get_user_history(page_id, sender_id, custom_prompt):
     conn = get_db_connection()
@@ -95,13 +98,13 @@ def admin_dashboard():
 def client_dashboard(page_id):
     return render_template("client.html", page_id=page_id)
 
-# --- REST API Endpoints (Frontend JS Integration) ---
+# --- REST API Endpoints ---
 
 @app.route("/api/clients", methods=["GET"])
 def api_get_clients():
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT page_id, client_name, custom_prompt, bot_status FROM clients")
+    cursor.execute("SELECT page_id, client_name, custom_prompt, bot_status, comment_status FROM clients")
     rows = cursor.fetchall()
     conn.close()
     
@@ -111,21 +114,23 @@ def api_get_clients():
             "page_id": r["page_id"],
             "page_name": r["client_name"] or "Facebook Page",
             "system_prompt": r["custom_prompt"],
-            "is_active": bool(r["bot_status"])
+            "is_active": bool(r["bot_status"]),
+            "comment_status": bool(r["comment_status"])
         })
     return jsonify({"clients": clients})
 
 @app.route("/api/clients/<page_id>", methods=["GET"])
 def api_get_single_client(page_id):
-    token, prompt, is_active, name = get_client_details(page_id)
-    if token:
+    p_token, c_token, prompt, is_active, comment_status, name = get_client_details(page_id)
+    if p_token:
         return jsonify({
             "success": True,
             "client": {
                 "page_id": page_id,
                 "page_name": name or "Facebook Page",
                 "system_prompt": prompt,
-                "is_active": is_active
+                "is_active": is_active,
+                "comment_status": comment_status
             }
         })
     return jsonify({"success": False, "error": "Client not found"}), 404
@@ -134,12 +139,12 @@ def api_get_single_client(page_id):
 def api_save_client():
     data = request.json or {}
     access_token = data.get("access_token", "").strip()
+    comment_access_token = data.get("comment_access_token", "").strip() or access_token
     system_prompt = data.get("system_prompt", "").strip()
 
     if not access_token or not system_prompt:
         return jsonify({"success": False, "error": "Access token and system prompt are required."}), 400
 
-    # Fetch Page ID and Page Name from Facebook Graph API using the token
     fb_url = f"https://graph.facebook.com/v18.0/me?access_token={access_token}"
     res = requests.get(fb_url).json()
 
@@ -152,18 +157,19 @@ def api_save_client():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO clients (page_id, page_access_token, client_name, custom_prompt, bot_status)
-        VALUES (?, ?, ?, ?, 1)
+        INSERT INTO clients (page_id, page_access_token, comment_access_token, client_name, custom_prompt, bot_status, comment_status)
+        VALUES (?, ?, ?, ?, ?, 1, 1)
         ON CONFLICT(page_id) DO UPDATE SET
             page_access_token = excluded.page_access_token,
+            comment_access_token = excluded.comment_access_token,
             client_name = excluded.client_name,
             custom_prompt = excluded.custom_prompt
-    """, (page_id, access_token, page_name, system_prompt))
+    """, (page_id, access_token, comment_access_token, page_name, system_prompt))
     conn.commit()
     conn.close()
 
-    # Subscribe page to webhook events
-    sub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?subscribed_fields=messages&access_token={access_token}"
+    # Subscribe page to both messaging & feed (comments) events
+    sub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?subscribed_fields=messages,feed&access_token={access_token}"
     requests.post(sub_url)
 
     return jsonify({"success": True, "page_id": page_id, "page_name": page_name})
@@ -180,6 +186,23 @@ def api_toggle_client():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE clients SET bot_status = ? WHERE page_id = ?", (1 if is_active else 0, page_id))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"success": True})
+
+@app.route("/api/clients/toggle-comment", methods=["POST"])
+def api_toggle_comment():
+    data = request.json or {}
+    page_id = data.get("page_id")
+    comment_status = data.get("comment_status")
+
+    if page_id is None or comment_status is None:
+        return jsonify({"success": False, "error": "Missing parameters"}), 400
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE clients SET comment_status = ? WHERE page_id = ?", (1 if comment_status else 0, page_id))
     conn.commit()
     conn.close()
 
@@ -210,10 +233,10 @@ def api_delete_client():
     if not page_id:
         return jsonify({"success": False, "error": "Missing page_id"}), 400
 
-    token, _, _, _ = get_client_details(page_id)
-    if token:
+    p_token, _, _, _, _, _ = get_client_details(page_id)
+    if p_token:
         try:
-            unsub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?access_token={token}"
+            unsub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?access_token={p_token}"
             requests.delete(unsub_url)
         except Exception as e:
             print(f"Unsubscribe Error: {e}")
@@ -251,11 +274,25 @@ def send_facebook_message(page_id, recipient_id, message_text, page_access_token
     headers = {"Content-Type": "application/json"}
     requests.post(url, json=payload, headers=headers)
 
+# Reply directly to a Facebook Comment
+def reply_to_facebook_comment(comment_id, message_text, comment_access_token):
+    url = f"https://graph.facebook.com/v18.0/{comment_id}/comments?access_token={comment_access_token}"
+    payload = {"message": message_text}
+    requests.post(url, json=payload)
+
+# Send Private DM for a Comment
+def send_private_dm_for_comment(comment_id, message_text, page_access_token):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={page_access_token}"
+    payload = {
+        "recipient": {"comment_id": comment_id},
+        "message": {"text": message_text}
+    }
+    requests.post(url, json=payload)
+
 def process_message_async(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt):
     try:
         final_input_text = user_message_text
 
-        # Audio Processing via Whisper
         if audio_url:
             try:
                 audio_data = requests.get(audio_url).content
@@ -270,7 +307,6 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
                         response_format="text"
                     )
                 
-                # Instruction passed to LLM so it doesn't get confused
                 final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly. NEVER mention that you cannot process voice notes."
                 
                 if os.path.exists(audio_path):
@@ -291,6 +327,24 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
             send_facebook_message(page_id, recipient_id=sender_id, message_text=ai_reply, page_access_token=page_access_token)
     except Exception as e:
         print(f"Async Error: {e}")
+
+def process_comment_async(page_id, comment_id, user_comment, page_access_token, comment_access_token, custom_prompt):
+    try:
+        system_instruction = f"{custom_prompt}\n\n[STRICT RULE: Keep the reply short, polite, and helpful in Bengali/Banglish. State that you have sent details in their inbox.]"
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": f"User Comment: {user_comment}"}
+        ]
+        ai_reply = generate_ai_reply(messages)
+
+        # 1. Reply to public comment
+        reply_to_facebook_comment(comment_id, ai_reply, comment_access_token)
+
+        # 2. Send Private Message (DM) instantly
+        send_private_dm_for_comment(comment_id, ai_reply, page_access_token)
+
+    except Exception as e:
+        print(f"Comment Processing Error: {e}")
 
 # --- Facebook Webhook Route ---
 @app.route("/webhook", methods=["GET", "POST"])
@@ -314,38 +368,54 @@ def facebook_webhook():
                 for entry in data.get("entry", []):
                     page_id = entry.get("id")
                     
-                    page_access_token, custom_prompt, bot_is_running, _ = get_client_details(page_id)
-                    
-                    if not page_access_token or not bot_is_running or not custom_prompt:
-                        continue
+                    page_access_token, comment_access_token, custom_prompt, bot_is_running, comment_is_running, _ = get_client_details(page_id)
 
-                    for messaging_event in entry.get("messaging", []):
-                        if messaging_event.get("message", {}).get("is_echo"):
-                            continue
+                    # 1. Handle Messenger Messages
+                    if bot_is_running and page_access_token and custom_prompt:
+                        for messaging_event in entry.get("messaging", []):
+                            if messaging_event.get("message", {}).get("is_echo"):
+                                continue
 
-                        sender_id = messaging_event.get("sender", {}).get("id")
-                        if sender_id == page_id:
-                            continue
+                            sender_id = messaging_event.get("sender", {}).get("id")
+                            if sender_id == page_id:
+                                continue
 
-                        user_message_text = ""
-                        audio_url = None
+                            user_message_text = ""
+                            audio_url = None
 
-                        if "message" in messaging_event and "text" in messaging_event["message"]:
-                            user_message_text = messaging_event["message"]["text"]
+                            if "message" in messaging_event and "text" in messaging_event["message"]:
+                                user_message_text = messaging_event["message"]["text"]
 
-                        if "message" in messaging_event and "attachments" in messaging_event["message"]:
-                            for att in messaging_event["message"]["attachments"]:
-                                att_type = att.get("type")
-                                if att_type == "image":
-                                    user_message_text = "এই ছবিটি দেখে আপনার সার্ভিস অনুযায়ী রেসপন্স করুন।"
-                                elif att_type in ["audio", "voice"]:
-                                    audio_url = att.get("payload", {}).get("url")
+                            if "message" in messaging_event and "attachments" in messaging_event["message"]:
+                                for att in messaging_event["message"]["attachments"]:
+                                    att_type = att.get("type")
+                                    if att_type == "image":
+                                        user_message_text = "এই ছবিটি দেখে আপনার সার্ভিস অনুযায়ী রেসপন্স করুন।"
+                                    elif att_type in ["audio", "voice"]:
+                                        audio_url = att.get("payload", {}).get("url")
 
-                        if user_message_text or audio_url:
-                            threading.Thread(
-                                target=process_message_async, 
-                                args=(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt)
-                            ).start()
+                            if user_message_text or audio_url:
+                                threading.Thread(
+                                    target=process_message_async, 
+                                    args=(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt)
+                                ).start()
+
+                    # 2. Handle Page Comments (Feed)
+                    if comment_is_running and comment_access_token and custom_prompt:
+                        for change in entry.get("changes", []):
+                            if change.get("field") == "feed":
+                                value = change.get("value", {})
+                                if value.get("item") == "comment" and value.get("verb") == "add":
+                                    comment_id = value.get("comment_id")
+                                    user_comment = value.get("message")
+                                    sender_id = value.get("from", {}).get("id")
+
+                                    # Ignore own page comments
+                                    if sender_id != page_id and user_comment:
+                                        threading.Thread(
+                                            target=process_comment_async,
+                                            args=(page_id, comment_id, user_comment, page_access_token, comment_access_token, custom_prompt)
+                                        ).start()
 
         except Exception as e:
             print(f"Error processing webhook: {e}")

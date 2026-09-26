@@ -45,8 +45,14 @@
             </h2>
 
             <div>
-                <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Facebook Page Access Token</label>
+                <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Facebook Page Access Token (Inbox)</label>
                 <input type="text" id="access_token" placeholder="EAA..." class="w-full px-4 py-3 rounded-2xl bg-white/70 border border-white/80 focus:outline-none focus:ring-2 focus:ring-orange-500/50 text-gray-800 text-sm shadow-inner">
+            </div>
+
+            <!-- New Input Field for Comment Access Token -->
+            <div>
+                <label class="block text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2">Comment Access Token (Optional / Same as Page Token)</label>
+                <input type="text" id="comment_access_token" placeholder="EAA... (If empty, uses Page Access Token)" class="w-full px-4 py-3 rounded-2xl bg-white/70 border border-white/80 focus:outline-none focus:ring-2 focus:ring-orange-500/50 text-gray-800 text-sm shadow-inner">
             </div>
 
             <div>
@@ -120,22 +126,28 @@
 
         async function addClient() {
             const token = document.getElementById('access_token').value.trim();
+            const commentToken = document.getElementById('comment_access_token').value.trim();
             const prompt = document.getElementById('system_prompt').value.trim();
 
             if (!token || !prompt) {
-                alert("Please fill in both fields!");
+                alert("Please fill in Page Access Token and System Prompt!");
                 return;
             }
 
             const res = await fetch('/api/clients/save', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ access_token: token, system_prompt: prompt })
+                body: JSON.stringify({ 
+                    access_token: token, 
+                    comment_access_token: commentToken || token,
+                    system_prompt: prompt 
+                })
             });
 
             const result = await res.json();
             if (result.success) {
                 document.getElementById('access_token').value = '';
+                document.getElementById('comment_access_token').value = '';
                 document.getElementById('system_prompt').value = '';
                 loadClients();
             } else {

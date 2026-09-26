@@ -29,16 +29,32 @@
     <div class="max-w-xl w-full glass-card rounded-3xl p-6 md:p-8 space-y-6">
         
         <!-- Header -->
-        <div class="flex items-center justify-between border-b border-orange-100 pb-4">
+        <div class="border-b border-orange-100 pb-4 space-y-4">
             <div>
                 <h1 id="page_name" class="text-2xl font-bold text-gray-900">Loading Page...</h1>
                 <p id="page_id_text" class="text-xs text-gray-500 font-mono mt-0.5">Page ID: {{ page_id }}</p>
             </div>
-            <!-- iOS Toggle -->
-            <label class="relative inline-flex items-center cursor-pointer">
-                <input type="checkbox" id="toggle_status" onchange="toggleStatus(this.checked)" class="sr-only peer">
-                <div class="w-14 h-8 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-7 after:w-7 after:transition-all peer-checked:bg-orange-500"></div>
-            </label>
+
+            <!-- Toggles Section -->
+            <div class="space-y-3 pt-2">
+                <!-- Messenger Automation Toggle -->
+                <div class="flex items-center justify-between bg-white/50 p-3 rounded-2xl border border-white">
+                    <span class="text-sm font-semibold text-gray-700">Inbox AI Messenger</span>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggle_status" onchange="toggleStatus(this.checked)" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                    </label>
+                </div>
+
+                <!-- Comment Reply Automation Toggle -->
+                <div class="flex items-center justify-between bg-white/50 p-3 rounded-2xl border border-white">
+                    <span class="text-sm font-semibold text-gray-700">Comment Auto Reply</span>
+                    <label class="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" id="toggle_comment_status" onchange="toggleCommentStatus(this.checked)" class="sr-only peer">
+                        <div class="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-orange-500"></div>
+                    </label>
+                </div>
+            </div>
         </div>
 
         <!-- Status Indicator -->
@@ -69,21 +85,22 @@
                 document.getElementById('page_name').innerText = client.page_name;
                 document.getElementById('system_prompt').value = client.system_prompt;
                 document.getElementById('toggle_status').checked = client.is_active;
+                document.getElementById('toggle_comment_status').checked = client.comment_status;
 
-                updateStatusUI(client.is_active);
+                updateStatusUI(client.is_active, client.comment_status);
             } else {
                 alert("Invalid or inactive Page Dashboard link.");
             }
         }
 
-        function updateStatusUI(isActive) {
+        function updateStatusUI(isActive, isCommentActive) {
             const badge = document.getElementById('status_badge');
-            if (isActive) {
+            if (isActive || isCommentActive) {
                 badge.className = "p-3 rounded-2xl text-center font-semibold text-sm bg-emerald-100 text-emerald-800 border border-emerald-200";
-                badge.innerText = "● AI Messenger Automation is ACTIVE";
+                badge.innerText = `● Automation: Inbox (${isActive ? 'ON' : 'OFF'}) | Comments (${isCommentActive ? 'ON' : 'OFF'})`;
             } else {
                 badge.className = "p-3 rounded-2xl text-center font-semibold text-sm bg-rose-100 text-rose-800 border border-rose-200";
-                badge.innerText = "○ AI Messenger Automation is PAUSED";
+                badge.innerText = "○ All AI Automations are PAUSED";
             }
         }
 
@@ -93,7 +110,18 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ page_id: pageId, is_active: isActive })
             });
-            updateStatusUI(isActive);
+            const isCommentActive = document.getElementById('toggle_comment_status').checked;
+            updateStatusUI(isActive, isCommentActive);
+        }
+
+        async function toggleCommentStatus(isCommentActive) {
+            await fetch('/api/clients/toggle-comment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ page_id: pageId, comment_status: isCommentActive })
+            });
+            const isActive = document.getElementById('toggle_status').checked;
+            updateStatusUI(isActive, isCommentActive);
         }
 
         async function savePrompt() {
