@@ -1,12 +1,24 @@
 import os
+import time
 import sqlite3
 import requests
 import threading
-from flask import Flask, request, jsonify, render_template, redirect
-from groq import Groq
+from flask import Flask, request, jsonify, render_template
 
-# --- Configuration ---
-client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+# --- Multiple Groq API Keys Rotation Setup ---
+GROQ_API_KEYS = [
+    os.environ.get("GROQ_API_KEY_1", "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").strip(),
+    os.environ.get("GROQ_API_KEY_2", "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").strip(),
+    os.environ.get("GROQ_API_KEY_3", "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").strip()
+]
+
+# Clean empty keys
+GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
+
+# Fallback single key check
+if not GROQ_API_KEYS and os.environ.get("GROQ_API_KEY"):
+    GROQ_API_KEYS = [os.environ.get("GROQ_API_KEY").strip()]
+
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "my_secure_verify_token")
 
 # --- Database Setup ---
@@ -99,7 +111,6 @@ def client_dashboard(page_id):
     return render_template("client.html", page_id=page_id)
 
 # --- REST API Endpoints ---
-
 @app.route("/api/clients", methods=["GET"])
 def api_get_clients():
     conn = get_db_connection()
@@ -168,7 +179,6 @@ def api_save_client():
     conn.commit()
     conn.close()
 
-    # Subscribe page to both messaging & feed (comments) events
     sub_url = f"https://graph.facebook.com/v18.0/{page_id}/subscribed_apps?subscribed_fields=messages,feed&access_token={access_token}"
     requests.post(sub_url)
 
@@ -250,19 +260,34 @@ def api_delete_client():
 
     return jsonify({"success": True})
 
-# --- AI & Messaging Async Workers ---
+# --- Multi-Key AI Reply Generator (Auto Rotation & Failover) ---
 def generate_ai_reply(messages):
-    try:
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b",
-            messages=messages,
-            temperature=0.6,
-            max_tokens=800,
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        print(f"Groq API Error: {e}")
-        return "দুঃখিত, এই মুহূর্তে উত্তর দিতে একটু সমস্যা হচ্ছে।"
+    from groq import Groq
+
+    for idx, key in enumerate(GROQ_API_KEYS):
+        try:
+            temp_client = Groq(api_key=key)
+            completion = temp_client.chat.completions.create(
+                model="openai/gpt-oss-120b",  # Updated Model ID
+                messages=messages,
+                temperature=0.6,
+                max_tokens=1000,
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            print(f"Groq API Key {idx + 1} Failed: {e}")
+            continue
+
+    return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
+
+# --- Facebook Typing Indicator & Messenger Sender ---
+def send_typing_indicator(recipient_id, page_access_token):
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={page_access_token}"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "sender_action": "typing_on"
+    }
+    requests.post(url, json=payload)
 
 def send_facebook_message(page_id, recipient_id, message_text, page_access_token):
     url = f"https://graph.facebook.com/v18.0/me/messages?access_token={page_access_token}"
@@ -291,6 +316,9 @@ def send_private_dm_for_comment(comment_id, message_text, page_access_token):
 
 def process_message_async(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt):
     try:
+        # 1. Immediate Typing Indicator
+        send_typing_indicator(sender_id, page_access_token)
+
         final_input_text = user_message_text
 
         if audio_url:
@@ -300,14 +328,17 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
                 with open(audio_path, "wb") as f:
                     f.write(audio_data)
                 
+                # Audio translation using Key 1 or fallback
+                from groq import Groq
+                temp_client = Groq(api_key=GROQ_API_KEYS[0] if GROQ_API_KEYS else "")
                 with open(audio_path, "rb") as file:
-                    transcription = client.audio.translations.create(
+                    transcription = temp_client.audio.translations.create(
                         file=(audio_path, file.read()),
                         model="whisper-large-v3-turbo",
                         response_format="text"
                     )
                 
-                final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly. NEVER mention that you cannot process voice notes."
+                final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly."
                 
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
@@ -317,20 +348,23 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
 
         if final_input_text:
             chat_messages = get_user_history(page_id, sender_id, custom_prompt)
-            
             save_message_to_db(page_id, sender_id, "user", final_input_text)
             chat_messages.append({"role": "user", "content": final_input_text})
 
+            # AI Reply Generation
             ai_reply = generate_ai_reply(chat_messages)
             save_message_to_db(page_id, sender_id, "assistant", ai_reply)
-            
+
+            # 2. Add 4-Second Human Delay while showing "Typing..."
+            time.sleep(4)
+
+            # Send Message
             send_facebook_message(page_id, recipient_id=sender_id, message_text=ai_reply, page_access_token=page_access_token)
     except Exception as e:
         print(f"Async Error: {e}")
 
 def process_comment_async(page_id, comment_id, user_comment, page_access_token, comment_access_token, custom_prompt):
     try:
-        # 1. User Comment specific reply generated by AI
         public_instruction = f"{custom_prompt}\n\n[STRICT RULE: Read the user comment carefully and reply to it directly in a friendly Bengali/Banglish tone. Keep it within 1-2 lines. Mention that you sent more details in Inbox.]"
         public_messages = [
             {"role": "system", "content": public_instruction},
@@ -338,13 +372,9 @@ def process_comment_async(page_id, comment_id, user_comment, page_access_token, 
         ]
         public_ai_reply = generate_ai_reply(public_messages)
 
-        # Send Public Reply
         reply_to_facebook_comment(comment_id, public_ai_reply, comment_access_token)
 
-        # 2. Instant Template DM for Inbox
-        dm_template_text = f"হ্যালো! আপনার কমেন্টটির জন্য ধন্যবাদ 😊\n\nআমরা আপনার ইনবক্সে যুক্ত হয়েছি। আপনার যেকোনো প্রশ্ন বা সার্ভিস সম্পর্কিত তথ্যের জন্য আমাদের সাথে সরাসরি মেসেজে কথা বলতে পারেন!"
-
-        # Send Private DM
+        dm_template_text = f"হ্যালো! আপনার কমেন্টটির জন্য ধন্যবাদ 😊\n\nআমরা আপনার ইনবক্সে যুক্ত হয়েছি। আপনার যেকোনো প্রশ্ন বা সার্ভিস সম্পর্কিত তথ্যের জন্য আমাদের সাথে সরাসরি মেসেজে কথা বলতে পারেন!"
         send_private_dm_for_comment(comment_id, dm_template_text, page_access_token)
 
     except Exception as e:
@@ -414,7 +444,6 @@ def facebook_webhook():
                                     user_comment = value.get("message")
                                     sender_id = value.get("from", {}).get("id")
 
-                                    # Ignore own page comments
                                     if sender_id != page_id and user_comment:
                                         threading.Thread(
                                             target=process_comment_async,
