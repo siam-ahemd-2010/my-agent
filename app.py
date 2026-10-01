@@ -316,19 +316,17 @@ def send_private_dm_for_comment(comment_id, message_text, page_access_token):
 
 def process_message_async(page_id, sender_id, user_message_text, audio_url, page_access_token, custom_prompt):
     try:
-        # 1. Immediate Typing Indicator
-        send_typing_indicator(sender_id, page_access_token)
-
         final_input_text = user_message_text
 
+        # 1. Voice note handling
         if audio_url:
             try:
+                send_typing_indicator(sender_id, page_access_token)
                 audio_data = requests.get(audio_url).content
                 audio_path = f"temp_{sender_id}.mp3"
                 with open(audio_path, "wb") as f:
                     f.write(audio_data)
                 
-                # Audio translation using Key 1 or fallback
                 from groq import Groq
                 temp_client = Groq(api_key=GROQ_API_KEYS[0] if GROQ_API_KEYS else "")
                 with open(audio_path, "rb") as file:
@@ -351,14 +349,16 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
             save_message_to_db(page_id, sender_id, "user", final_input_text)
             chat_messages.append({"role": "user", "content": final_input_text})
 
-            # AI Reply Generation
+            # 2. AI Reply generation (runs in background first)
             ai_reply = generate_ai_reply(chat_messages)
             save_message_to_db(page_id, sender_id, "assistant", ai_reply)
 
-            # 2. Add 4-Second Human Delay while showing "Typing..."
-            time.sleep(4)
+            # 3. Continuous Typing Indicator for full 4 seconds
+            for _ in range(4):
+                send_typing_indicator(sender_id, page_access_token)
+                time.sleep(1)
 
-            # Send Message
+            # 4. Send Message after 4 full seconds of typing animation
             send_facebook_message(page_id, recipient_id=sender_id, message_text=ai_reply, page_access_token=page_access_token)
     except Exception as e:
         print(f"Async Error: {e}")
