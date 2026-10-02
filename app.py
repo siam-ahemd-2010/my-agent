@@ -6,7 +6,6 @@ import threading
 from flask import Flask, request, jsonify, render_template
 
 # --- Multiple Groq API Keys Rotation Setup ---
-# Environment Variable থেকে Key রিড করা হবে
 GROQ_API_KEYS = [
     os.environ.get("GROQ_API_KEY_1", "").strip(),
     os.environ.get("GROQ_API_KEY_2", "").strip(),
@@ -266,21 +265,22 @@ def generate_ai_reply(messages):
     from groq import Groq
 
     if not GROQ_API_KEYS:
-        print("Warning: No GROQ API Keys provided in environment variables.")
+        print("❌ Warning: No GROQ API Keys provided in environment variables.")
         return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
 
     for idx, key in enumerate(GROQ_API_KEYS):
         try:
             temp_client = Groq(api_key=key)
             completion = temp_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=messages,
                 temperature=0.6,
                 max_tokens=1000,
             )
+            print(f"✅ Success using Groq Key Index #{idx + 1}")
             return completion.choices[0].message.content
         except Exception as e:
-            print(f"Groq API Key {idx + 1} Failed: {e}")
+            print(f"❌ Groq API Key #{idx + 1} Failed: {e}")
             continue
 
     return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
