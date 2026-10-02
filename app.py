@@ -6,16 +6,17 @@ import threading
 from flask import Flask, request, jsonify, render_template
 
 # --- Multiple Groq API Keys Rotation Setup ---
+# Environment Variable থেকে Key রিড করা হবে
 GROQ_API_KEYS = [
-    os.environ.get("GROQ_API_KEY_1", "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").strip(),
-    os.environ.get("GROQ_API_KEY_2", "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").strip(),
-    os.environ.get("GROQ_API_KEY_3", "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").strip()
+    os.environ.get("GROQ_API_KEY_1", "").strip(),
+    os.environ.get("GROQ_API_KEY_2", "").strip(),
+    os.environ.get("GROQ_API_KEY_3", "").strip()
 ]
 
-# Clean empty keys
+# ফাকা Key থাকলে ফিল্টার করে বাদ দেয়া
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
 
-# Fallback single key check
+# সিঙ্গেল GROQ_API_KEY ফ্যালব্যাক চেক
 if not GROQ_API_KEYS and os.environ.get("GROQ_API_KEY"):
     GROQ_API_KEYS = [os.environ.get("GROQ_API_KEY").strip()]
 
@@ -264,11 +265,15 @@ def api_delete_client():
 def generate_ai_reply(messages):
     from groq import Groq
 
+    if not GROQ_API_KEYS:
+        print("Warning: No GROQ API Keys provided in environment variables.")
+        return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
+
     for idx, key in enumerate(GROQ_API_KEYS):
         try:
             temp_client = Groq(api_key=key)
             completion = temp_client.chat.completions.create(
-                model="openai/gpt-oss-120b",  # Updated Model ID
+                model="llama-3.3-70b-versatile",
                 messages=messages,
                 temperature=0.6,
                 max_tokens=1000,
@@ -279,6 +284,25 @@ def generate_ai_reply(messages):
             continue
 
     return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
+
+# --- Voice Note Transcription (Key Failover Supported) ---
+def transcribe_audio_file(audio_path):
+    from groq import Groq
+
+    for idx, key in enumerate(GROQ_API_KEYS):
+        try:
+            temp_client = Groq(api_key=key)
+            with open(audio_path, "rb") as file:
+                transcription = temp_client.audio.translations.create(
+                    file=(audio_path, file.read()),
+                    model="whisper-large-v3-turbo",
+                    response_format="text"
+                )
+            return transcription
+        except Exception as e:
+            print(f"Groq Audio Key {idx + 1} Failed: {e}")
+            continue
+    return None
 
 # --- Facebook Typing Indicator & Messenger Sender ---
 def send_typing_indicator(recipient_id, page_access_token):
@@ -318,31 +342,28 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
     try:
         final_input_text = user_message_text
 
-        # 1. Voice note handling
+        # 1. Voice note handling with failover
         if audio_url:
+            audio_path = f"temp_{sender_id}.mp3"
             try:
                 send_typing_indicator(sender_id, page_access_token)
                 audio_data = requests.get(audio_url).content
-                audio_path = f"temp_{sender_id}.mp3"
                 with open(audio_path, "wb") as f:
                     f.write(audio_data)
                 
-                from groq import Groq
-                temp_client = Groq(api_key=GROQ_API_KEYS[0] if GROQ_API_KEYS else "")
-                with open(audio_path, "rb") as file:
-                    transcription = temp_client.audio.translations.create(
-                        file=(audio_path, file.read()),
-                        model="whisper-large-v3-turbo",
-                        response_format="text"
-                    )
+                transcription = transcribe_audio_file(audio_path)
                 
-                final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly."
+                if transcription:
+                    final_input_text = f"[System Note: User sent a Voice Note. Transcribed content: '{transcription}']. Respond to the message directly."
+                else:
+                    final_input_text = "আমি আপনার ভয়েস মেসেজটি পেয়েছি কিন্তু শুনতে সমস্যা হচ্ছে, দয়া করে কথাটি লিখে বলবেন?"
                 
+            except Exception as audio_err:
+                print(f"Audio Processing Error: {audio_err}")
+                final_input_text = "আমি আপনার ভয়েস মেসেজটি পেয়েছি কিন্তু শুনতে সমস্যা হচ্ছে, দয়া করে কথাটি লিখে বলবেন?"
+            finally:
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
-            except Exception as audio_err:
-                print(f"Audio Transcription Error: {audio_err}")
-                final_input_text = "আমি আপনার ভয়েস মেসেজটি পেয়েছি কিন্তু শুনতে সমস্যা হচ্ছে, দয়া করে কথাটি লিখে বলবেন?"
 
         if final_input_text:
             chat_messages = get_user_history(page_id, sender_id, custom_prompt)
