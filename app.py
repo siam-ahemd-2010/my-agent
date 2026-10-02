@@ -12,7 +12,7 @@ GROQ_API_KEYS = [
     os.environ.get("GROQ_API_KEY_3", "").strip()
 ]
 
-# ফাকা Key থাকলে ফিল্টার করে বাদ দেয়া
+# ফাকা Key থাকলে ফিল্টার করে বাদ দেয়া
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k]
 
 # সিঙ্গেল GROQ_API_KEY ফ্যালব্যাক চেক
@@ -76,7 +76,7 @@ def get_user_history(page_id, sender_id, custom_prompt):
         SELECT role, content FROM (
             SELECT role, content, ROWID FROM chat_history 
             WHERE page_id = ? AND sender_id = ? 
-            ORDER BY ROWID DESC LIMIT 10
+            ORDER BY ROWID DESC LIMIT 8
         ) ORDER BY ROWID ASC
     """, (page_id, sender_id))
     
@@ -260,7 +260,7 @@ def api_delete_client():
 
     return jsonify({"success": True})
 
-# --- Multi-Key AI Reply Generator (Auto Rotation & Failover) ---
+# --- Multi-Key AI Reply Generator (Auto Rotation & Model Fallback) ---
 def generate_ai_reply(messages):
     from groq import Groq
 
@@ -268,20 +268,24 @@ def generate_ai_reply(messages):
         print("❌ Warning: No GROQ API Keys provided in environment variables.")
         return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
 
+    # Primary and secondary models available on Groq Free Tier
+    available_models = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
+
     for idx, key in enumerate(GROQ_API_KEYS):
-        try:
-            temp_client = Groq(api_key=key)
-            completion = temp_client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=messages,
-                temperature=0.6,
-                max_tokens=1000,
-            )
-            print(f"✅ Success using Groq Key Index #{idx + 1}")
-            return completion.choices[0].message.content
-        except Exception as e:
-            print(f"❌ Groq API Key #{idx + 1} Failed: {e}")
-            continue
+        for model_name in available_models:
+            try:
+                temp_client = Groq(api_key=key)
+                completion = temp_client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0.6,
+                    max_tokens=500,  # Reduced token limit to fit Free Tier TPM limits
+                )
+                print(f"✅ Success using Key #{idx + 1} with Model: {model_name}")
+                return completion.choices[0].message.content
+            except Exception as e:
+                print(f"❌ Key #{idx + 1} with Model {model_name} Failed: {e}")
+                continue
 
     return "দুঃখিত, এই মুহূর্তে সার্ভিস সংক্রান্ত তথ্যের জন্য আমাদের সাপোর্ট নাম্বারে যোগাযোগ করুন।"
 
@@ -370,7 +374,7 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
             save_message_to_db(page_id, sender_id, "user", final_input_text)
             chat_messages.append({"role": "user", "content": final_input_text})
 
-            # 2. AI Reply generation (runs in background first)
+            # 2. AI Reply generation
             ai_reply = generate_ai_reply(chat_messages)
             save_message_to_db(page_id, sender_id, "assistant", ai_reply)
 
@@ -379,7 +383,7 @@ def process_message_async(page_id, sender_id, user_message_text, audio_url, page
                 send_typing_indicator(sender_id, page_access_token)
                 time.sleep(1)
 
-            # 4. Send Message after 4 full seconds of typing animation
+            # 4. Send Message after typing animation
             send_facebook_message(page_id, recipient_id=sender_id, message_text=ai_reply, page_access_token=page_access_token)
     except Exception as e:
         print(f"Async Error: {e}")
